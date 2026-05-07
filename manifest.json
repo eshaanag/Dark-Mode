@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "StudyRAG",
+  "version": "1.0.0",
+  "description": "A fast, lightweight personal study assistant for searching your own notes while practicing.",
+  "permissions": ["activeTab", "scripting", "storage", "sidePanel"],
+  "host_permissions": [
+    "https://api.x.ai/*",
+    "https://generativelanguage.googleapis.com/*",
+    "http://localhost:*/*",
+    "http://127.0.0.1:*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "StudyRAG",
+    "default_popup": "popup.html"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "commands": {
+    "search-notes": {
+      "suggested_key": {
+        "default": "Alt+Q",
+        "mac": "Alt+Q"
+      },
+      "description": "Search notes for selected text"
+    },
+    "toggle-panel": {
+      "suggested_key": {
+        "default": "Alt+S",
+        "mac": "Alt+S"
+      },
+      "description": "Open or close the StudyRAG side panel"
+    }
+  }
+}
