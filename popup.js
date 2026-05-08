@@ -1,60 +1,56 @@
-import { initRetriever } from "./retriever.js";
+const notesEl = document.getElementById("notes");
+const saveBtn = document.getElementById("save");
+const grokKeyEl = document.getElementById("grokKey");
+const geminiKeyEl = document.getElementById("geminiKey");
+const ollamaUrlEl = document.getElementById("ollamaUrl");
+const primaryAIEl = document.getElementById("primaryAI");
+const statusEl = document.getElementById("status");
 
-const notes = document.getElementById("notes");
-const save = document.getElementById("save");
-const grokKey = document.getElementById("grokKey");
-const geminiKey = document.getElementById("geminiKey");
-const ollamaUrl = document.getElementById("ollamaUrl");
-const primaryAI = document.getElementById("primaryAI");
-const status = document.getElementById("status");
+document.addEventListener("DOMContentLoaded", hydrate);
+saveBtn.addEventListener("click", save);
 
-hydratePopup();
-
-save.addEventListener("click", async () => {
-  save.disabled = true;
-  status.textContent = "Indexing...";
-
+async function save() {
+  saveBtn.disabled = true;
+  statusEl.textContent = "Saving...";
   try {
-    const ragData = notes.value.trim();
-    const ragIndex = initRetriever(ragData);
-    const apiKeys = {
-      grok: grokKey.value.trim(),
-      gemini: geminiKey.value.trim(),
-      ollamaUrl: ollamaUrl.value.trim() || "http://localhost:11434"
-    };
-
+    const ragData = notesEl.value.trim();
     await chrome.storage.session.set({
       ragData,
-      ragIndex,
-      apiKeys,
-      primaryAI: primaryAI.value
+      ragIndex: null,
+      apiKeys: {
+        grok: grokKeyEl.value.trim(),
+        gemini: geminiKeyEl.value.trim(),
+        ollamaUrl: ollamaUrlEl.value.trim() || "http://localhost:11434"
+      },
+      primaryAI: primaryAIEl.value
     });
-
-    await chrome.runtime.sendMessage({ action: "dataUpdated" }).catch(() => null);
-    notifyActiveTab();
-    status.textContent = `${ragIndex.chunks.length} chunks indexed | Ready`;
-  } catch (error) {
-    status.textContent = `Could not load notes: ${error.message || "Unknown error"}`;
+    const res = await msg({ action: "dataUpdated" });
+    const n = res?.chunkCount ?? 0;
+    statusEl.textContent = n + " chunks indexed" + (n === 0 && ragData ? " — try Q:/A: format" : " — ready");
+  } catch(e) {
+    statusEl.textContent = "Error: " + e.message;
   } finally {
-    save.disabled = false;
+    saveBtn.disabled = false;
   }
-});
-
-async function hydratePopup() {
-  const stored = await chrome.storage.session.get(["ragData", "ragIndex", "apiKeys", "primaryAI"]);
-  notes.value = stored.ragData || "";
-  grokKey.value = stored.apiKeys?.grok || "";
-  geminiKey.value = stored.apiKeys?.gemini || "";
-  ollamaUrl.value = stored.apiKeys?.ollamaUrl || "http://localhost:11434";
-  primaryAI.value = stored.primaryAI || "grok";
-
-  const chunkCount = stored.ragIndex?.chunks?.length || 0;
-  status.textContent = `${chunkCount} chunks indexed | Ready`;
 }
 
-async function notifyActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab?.id) {
-    chrome.tabs.sendMessage(tab.id, { action: "dataUpdated" }).catch(() => {});
-  }
+async function hydrate() {
+  try {
+    const s = await chrome.storage.session.get(["ragData","ragIndex","apiKeys","primaryAI"]);
+    notesEl.value = s.ragData || "";
+    grokKeyEl.value = s.apiKeys?.grok || "";
+    geminiKeyEl.value = s.apiKeys?.gemini || "";
+    ollamaUrlEl.value = s.apiKeys?.ollamaUrl || "http://localhost:11434";
+    primaryAIEl.value = s.primaryAI || "grok";
+    statusEl.textContent = (s.ragIndex?.chunks?.length || 0) + " chunks indexed";
+  } catch(e) {}
+}
+
+function msg(m) {
+  return new Promise(r => {
+    chrome.runtime.sendMessage(m, res => {
+      if (chrome.runtime.lastError) { r(null); return; }
+      r(res);
+    });
+  });
 }

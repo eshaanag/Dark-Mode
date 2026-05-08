@@ -1,70 +1,57 @@
 const queryInput = document.getElementById("query");
 const searchButton = document.getElementById("search");
-const closePanel = document.getElementById("closePanel");
+const closePanelButton = document.getElementById("closePanel");
 const notesResult = document.getElementById("notesResult");
 const aiResult = document.getElementById("aiResult");
-const confidence = document.getElementById("confidence");
-const provider = document.getElementById("provider");
+const confidenceBadge = document.getElementById("confidence");
+const providerLabel = document.getElementById("provider");
 const historyEl = document.getElementById("history");
-const quizMe = document.getElementById("quizMe");
+const quizButton = document.getElementById("quizMe");
 const quizCard = document.getElementById("quizCard");
 const quizResult = document.getElementById("quizResult");
 const quizProvider = document.getElementById("quizProvider");
 
 let currentResult = null;
 
-initPanel();
-
+document.addEventListener("DOMContentLoaded", initPanel);
 searchButton.addEventListener("click", () => runManualSearch(queryInput.value));
 queryInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") runManualSearch(queryInput.value);
 });
 
-closePanel.addEventListener("click", () => {
-  chrome.runtime.sendMessage({ action: "panelClosed" }).catch(() => {});
+closePanelButton.addEventListener("click", () => {
+  sendMessage({ action: "panelClosed" });
   window.close();
 });
 
-quizMe.addEventListener("click", async () => {
-  const chunk = currentResult?.chunks?.[0];
-  if (!chunk) {
-    renderQuiz({ ok: false, error: "Search your notes first, then generate a practice question." });
-    return;
-  }
-
-  quizCard.hidden = false;
-  quizResult.textContent = "Generating...";
-  quizProvider.textContent = "";
-  const response = await chrome.runtime.sendMessage({ action: "quizMe", chunk }).catch((error) => ({
-    ok: false,
-    error: error.message
-  }));
-  renderQuiz(response);
-});
+quizButton.addEventListener("click", runQuiz);
 
 chrome.runtime.onMessage.addListener((message) => {
-  if (message?.action === "studyRagResult") {
+  if (!message || !message.action) return;
+
+  if (message.action === "showResult" || message.action === "studyRagResult") {
     renderResult(message.result);
     renderHistory(message.history || []);
   }
 
-  if (message?.action === "quizResult") {
+  if (message.action === "quizResult") {
     renderQuiz(message.result);
   }
 
-  if (message?.action === "closePanel") {
-    chrome.runtime.sendMessage({ action: "panelClosed" }).catch(() => {});
+  if (message.action === "closePanel") {
+    sendMessage({ action: "panelClosed" });
     window.close();
   }
 });
 
 window.addEventListener("pagehide", () => {
-  chrome.runtime.sendMessage({ action: "panelClosed" }).catch(() => {});
+  sendMessage({ action: "panelClosed" });
 });
 
 async function initPanel() {
-  const response = await chrome.runtime.sendMessage({ action: "panelReady" }).catch(() => null);
+  const response = await sendMessage({ action: "panelReady" });
   if (response?.latestResult) renderResult(response.latestResult);
+  if (response?.latestQuiz) renderQuiz(response.latestQuiz);
   renderHistory(response?.history || []);
 }
 
@@ -72,21 +59,36 @@ async function runManualSearch(query) {
   const cleanQuery = String(query || "").trim();
   if (!cleanQuery) return;
 
-  notesResult.textContent = "Searching your notes...";
+  renderLoading(cleanQuery);
+  const response = await sendMessage({ action: "manualSearch", query: cleanQuery });
+  renderResult(response || { ok: false, message: "Search failed." });
+}
+
+async function runQuiz() {
+  const chunk = currentResult?.chunks?.[0];
+  if (!chunk) {
+    renderQuiz({ ok: false, error: "Search your notes first, then generate a practice question." });
+    return;
+  }
+
+  quizCard.hidden = false;
+  quizResult.textContent = "Generating practice question...";
+  quizProvider.textContent = "";
+
+  const response = await sendMessage({ action: "quizMe", chunk });
+  renderQuiz(response || { ok: false, error: "Quiz generation failed." });
+}
+
+function renderLoading(query) {
+  queryInput.value = query;
+  currentResult = null;
+  confidenceBadge.textContent = "0%";
+  confidenceBadge.classList.remove("good");
   notesResult.classList.add("muted");
-  aiResult.textContent = "Checking for a direct match first.";
+  notesResult.textContent = "Searching your notes...";
   aiResult.classList.add("muted");
-  provider.textContent = "";
-
-  const response = await chrome.runtime.sendMessage({
-    action: "manualSearch",
-    query: cleanQuery
-  }).catch((error) => ({
-    ok: false,
-    message: error.message || "Search failed."
-  }));
-
-  renderResult(response);
+  aiResult.textContent = "Checking for note matches first.";
+  providerLabel.textContent = "";
 }
 
 function renderResult(result) {
@@ -95,44 +97,79 @@ function renderResult(result) {
 
   if (result.query) queryInput.value = result.query;
 
-  const topChunk = result.chunks?.[0] || null;
-  const percent = Math.min(99, Math.round((result.score || 0) * 100));
-  confidence.textContent = `${percent}%`;
-  confidence.classList.toggle("good", (result.score || 0) > 0.7);
+  const score = Number(result.score || 0);
+  const percent = Math.max(0, Math.min(99, Math.round(score * 100)));
+  confidenceBadge.textContent = `${percent}%`;
+  confidenceBadge.classList.toggle("good", score > 0.7);
 
-  if (topChunk) {
-    notesResult.classList.remove("muted");
-    notesResult.innerHTML = highlightTerms(topChunk.text, result.query || "");
-  } else {
+  renderChunks(result.chunks || [], result.query || "", result.message || "");
+  renderAi(result);
+}
+
+function renderChunks(chunks, query, message) {
+  notesResult.innerHTML = "";
+
+  if (!chunks.length) {
     notesResult.classList.add("muted");
-    notesResult.textContent = result.message || "No matching note chunk found.";
+    notesResult.textContent = message || "No matching chunks found.";
+    return;
   }
 
-  aiResult.classList.toggle("muted", !result.aiAnswer || result.status === "thinking");
-  aiResult.textContent = result.directAnswer
-    ? "Direct match found in your notes. AI was not needed."
-    : result.aiAnswer || "AI explanation will appear here.";
-  provider.textContent = result.aiProvider ? result.aiProvider.toUpperCase() : "";
+  notesResult.classList.remove("muted");
+
+  chunks.slice(0, 3).forEach((chunk, index) => {
+    const item = document.createElement("div");
+    item.style.marginBottom = index === chunks.length - 1 ? "0" : "10px";
+
+    const meta = document.createElement("div");
+    meta.className = "muted";
+    meta.style.fontSize = "11px";
+    meta.style.marginBottom = "4px";
+    meta.textContent = `${chunk.source || "notes"} | ${Math.round((chunk.score || 0) * 100)}%`;
+
+    const body = document.createElement("div");
+    body.innerHTML = highlightTerms(chunk.text || chunk.answer || "", query);
+
+    item.appendChild(meta);
+    item.appendChild(body);
+    notesResult.appendChild(item);
+  });
+}
+
+function renderAi(result) {
+  const hasDirect = Boolean(result.directAnswer);
+  const text = hasDirect
+    ? result.directAnswer
+    : result.aiAnswer || result.message || "AI explanation will appear here.";
+
+  aiResult.classList.toggle("muted", !text || result.status === "thinking");
+  aiResult.textContent = text;
+  providerLabel.textContent = result.aiProvider ? result.aiProvider.toUpperCase() : hasDirect ? "NOTES" : "";
 }
 
 function renderHistory(history) {
   historyEl.innerHTML = "";
+
   if (!history.length) {
-    historyEl.innerHTML = '<div class="muted">No searches yet.</div>';
+    const empty = document.createElement("div");
+    empty.className = "muted";
+    empty.textContent = "No searches yet.";
+    historyEl.appendChild(empty);
     return;
   }
 
-  for (const item of history.slice(0, 5)) {
+  history.slice(0, 5).forEach((item) => {
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = item.query;
     button.addEventListener("click", () => runManualSearch(item.query));
     historyEl.appendChild(button);
-  }
+  });
 }
 
 function renderQuiz(result) {
   quizCard.hidden = false;
+
   if (!result?.ok && result?.error) {
     quizResult.textContent = result.error;
     quizProvider.textContent = "";
@@ -141,6 +178,19 @@ function renderQuiz(result) {
 
   quizResult.textContent = result?.quiz || result?.answer || "No practice question generated.";
   quizProvider.textContent = result?.aiProvider ? result.aiProvider.toUpperCase() : "";
+}
+
+function sendMessage(message) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn("StudyRAG panel:", chrome.runtime.lastError.message);
+        resolve(null);
+        return;
+      }
+      resolve(response);
+    });
+  });
 }
 
 function highlightTerms(text, query) {

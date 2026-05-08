@@ -3,7 +3,7 @@
   "name": "StudyRAG",
   "version": "1.0.0",
   "description": "A fast, lightweight personal study assistant for searching your own notes while practicing.",
-  "permissions": ["activeTab", "scripting", "storage", "sidePanel"],
+  "permissions": ["activeTab", "scripting", "storage", "sidePanel", "alarms", "tabs"],
   "host_permissions": [
     "https://api.x.ai/*",
     "https://generativelanguage.googleapis.com/*",
