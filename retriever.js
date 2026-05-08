@@ -15,18 +15,25 @@ export function initRetriever(text = "") {
     const searchText = [chunk.text, chunk.answer || ""].filter(Boolean).join("\n");
     const tokens = tokenize(searchText);
     const tf = {};
+
     for (const token of tokens) {
       tf[token] = (tf[token] || 0) + 1;
     }
+
     return {
       ...chunk,
       id: `chunk-${index}`,
+      text: chunk.text,
+      answer: chunk.answer || "",
+      score: 0,
       tf,
       length: Math.max(tokens.length, 1)
     };
   });
 
+  const idf = {};
   const documentFrequency = {};
+
   for (const chunk of indexedChunks) {
     for (const token of Object.keys(chunk.tf)) {
       documentFrequency[token] = (documentFrequency[token] || 0) + 1;
@@ -34,16 +41,22 @@ export function initRetriever(text = "") {
   }
 
   const totalDocs = indexedChunks.length;
-  const idf = {};
-  for (const [token, freq] of Object.entries(documentFrequency)) {
-    idf[token] = Math.log(1 + (totalDocs - freq + 0.5) / (freq + 0.5));
+  for (const [token, frequency] of Object.entries(documentFrequency)) {
+    idf[token] = Math.log(1 + (totalDocs - frequency + 0.5) / (frequency + 0.5));
   }
 
   const avgLen = totalDocs
-    ? indexedChunks.reduce((sum, c) => sum + c.length, 0) / totalDocs
+    ? indexedChunks.reduce((sum, chunk) => sum + chunk.length, 0) / totalDocs
     : 1;
 
-  state = { chunks: indexedChunks, idf, avgLen: avgLen || 1, totalDocs, ready: true };
+  state = {
+    chunks: indexedChunks,
+    idf,
+    avgLen: avgLen || 1,
+    totalDocs,
+    ready: true
+  };
+
   return getIndexSnapshot();
 }
 
@@ -52,6 +65,7 @@ export function loadRetriever(snapshot) {
     state = emptyState();
     return false;
   }
+
   state = {
     chunks: snapshot.chunks,
     idf: snapshot.idf,
@@ -59,6 +73,7 @@ export function loadRetriever(snapshot) {
     totalDocs: snapshot.totalDocs || snapshot.chunks.length,
     ready: true
   };
+
   return true;
 }
 
@@ -83,25 +98,28 @@ export function query(questionText = "") {
   }
 
   const scored = state.chunks
-    .map((chunk) => ({
-      id: chunk.id,
-      text: chunk.text,
-      answer: chunk.answer || "",
-      source: chunk.source || "unknown",
-      score: retrievalScore(queryTokens, chunk)
-    }))
-    .filter((c) => c.score > 0)
+    .map((chunk) => {
+      const score = retrievalScore(queryTokens, chunk);
+      return {
+        id: chunk.id,
+        text: chunk.text,
+        answer: chunk.answer || "",
+        source: chunk.source || "unknown",
+        score
+      };
+    })
+    .filter((chunk) => chunk.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, 3);
 
   const top = scored[0] || null;
   const score = top ? top.score : 0;
 
-  // FIX: Lower threshold from 0.7 to 0.35 so short queries still get direct answers
-  // A chunk with an explicit answer field AND any meaningful match should return directly
-  const directAnswer = top && top.answer && score > 0.35 ? top.answer : null;
-
-  return { directAnswer, chunks: scored, score };
+  return {
+    directAnswer: top && top.answer && score > 0.7 ? top.answer : null,
+    chunks: scored,
+    score
+  };
 }
 
 export function parseChunks(input = "") {
@@ -109,29 +127,21 @@ export function parseChunks(input = "") {
   if (!text) return [];
 
   const chunks = [];
-
-  // Format 1: JSON/JS arrays and objects {question, answer}
   collectStructuredData(text, chunks);
-
-  // Format 2: JS-style object literals question: "...", answer: "..."
   collectRegexObjects(text, chunks);
-
-  // Format 3: Explicit "Q: ...\nA: ..." pairs
   collectExplicitQa(text, chunks);
-
-  // Format 4: Numbered pairs "1. question\nanswer"
   collectNumberedPairs(text, chunks);
-
-  // Format 5: Line pairs (question line followed by answer line)
   collectLinePairs(text, chunks);
 
-  const hasStructured = chunks.length > 0;
+  const hasStructuredChunks = chunks.length > 0;
 
-  // Fallback: raw paragraphs
-  if (!hasStructured) collectParagraphs(text, chunks);
+  if (!hasStructuredChunks) {
+    collectParagraphs(text, chunks);
+  }
 
-  // Last resort: individual sentences
-  if (!hasStructured && chunks.length === 0) collectSentences(text, chunks);
+  if (!hasStructuredChunks) {
+    collectSentences(text, chunks);
+  }
 
   return dedupeChunks(chunks).map((chunk, index) => ({
     id: `chunk-${index}`,
@@ -149,8 +159,8 @@ export function tokenize(text = "") {
     .replace(/[_-]/g, " ")
     .replace(/[^a-z0-9\s']/g, " ")
     .split(/\s+/)
-    .map((t) => stem(t.replace(/^'+|'+$/g, "")))
-    .filter((t) => t.length > 1 && !STOPWORDS.has(t));
+    .map((token) => stem(token.replace(/^'+|'+$/g, "")))
+    .filter((token) => token.length > 1 && !STOPWORDS.has(token));
 }
 
 function collectStructuredData(text, chunks) {
@@ -159,69 +169,95 @@ function collectStructuredData(text, chunks) {
       const parsed = JSON.parse(candidate);
       walkStructuredValue(parsed, chunks);
     } catch {
-      // Not valid JSON, handled by regex below
+      // Raw JS-like notes are handled by regex parsing below.
     }
   }
 }
 
 function collectRegexObjects(text, chunks) {
-  // Matches JS object literals: question: "...", answer: "..."
-  const re = /(?:^|[{,\[])\s*["']?(?:question|q)["']?\s*:\s*["'`]([\s\S]{3,}?)["'`]\s*,?\s*["']?(?:answer|a)["']?\s*:\s*["'`]([\s\S]{2,}?)["'`]/gi;
-  let m;
-  while ((m = re.exec(text)) !== null) {
-    addChunk(chunks, m[1], m[2], "js-object");
+  const objectRe = /(?:^|[{,\[])\s*["']?(?:question|q)["']?\s*:\s*["'`]([\s\S]{5,}?)["'`]\s*,?\s*["']?(?:answer|a)["']?\s*:\s*["'`]([\s\S]{2,}?)["'`]/gi;
+  let match;
+
+  while ((match = objectRe.exec(text)) !== null) {
+    addChunk(chunks, match[1], match[2], "js-object");
   }
 }
 
 function collectExplicitQa(text, chunks) {
-  const re = /(?:^|\n)\s*(?:Q|Question)\s*[:\-]\s*(.+?)\s*\n\s*(?:A|Answer)\s*[:\-]\s*([\s\S]+?)(?=\n\s*(?:Q|Question)\s*[:\-]|\n\s*\d+[.)]\s+|$)/gi;
-  let m;
-  while ((m = re.exec(text)) !== null) {
-    addChunk(chunks, m[1], m[2], "qa-format");
+  const qaRe = /(?:^|\n)\s*(?:Q|Question)\s*[:\-]\s*(.+?)\s*\n\s*(?:A|Answer)\s*[:\-]\s*([\s\S]+?)(?=\n\s*(?:Q|Question)\s*[:\-]|\n\s*\d+[.)]\s+|$)/gi;
+  let match;
+
+  while ((match = qaRe.exec(text)) !== null) {
+    addChunk(chunks, match[1], match[2], "qa-format");
   }
 }
 
 function collectNumberedPairs(text, chunks) {
-  const re = /(?:^|\n)\s*\d+[.)]\s*(.{5,}?)(?:\s*[-:–]\s*|\n\s*)(.{3,}?)(?=\n\s*\d+[.)]\s+|\n\s*(?:Q|Question)\s*[:\-]|$)/gis;
-  let m;
-  while ((m = re.exec(text)) !== null) {
-    const q = m[1].trim(), a = m[2].trim();
-    if (q && a && q !== a) addChunk(chunks, q, a, "numbered");
+  const numberedRe = /(?:^|\n)\s*\d+[.)]\s*(.{5,}?)(?:\s*[-:–]\s*|\n\s*)(.{3,}?)(?=\n\s*\d+[.)]\s+|\n\s*(?:Q|Question)\s*[:\-]|$)/gis;
+  let match;
+
+  while ((match = numberedRe.exec(text)) !== null) {
+    const question = match[1].trim();
+    const answer = match[2].trim();
+    if (question && answer && question !== answer) {
+      addChunk(chunks, question, answer, "numbered");
+    }
   }
 }
 
 function collectLinePairs(text, chunks) {
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-  for (let i = 0; i < lines.length - 1; i++) {
-    const cur = lines[i], next = lines[i + 1];
-    if (/^(?:q|question)\s*[:\-]/i.test(cur) && /^(?:a|answer)\s*[:\-]/i.test(next)) continue;
-    if (looksLikeQuestion(cur) && next.length > 2 && !looksLikeQuestion(next)) {
-      addChunk(chunks, cur.replace(/^\d+[.)]\s*/, ""), next, "line-pair");
-      i++;
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    const current = lines[index];
+    const next = lines[index + 1];
+
+    if (/^(?:q|question)\s*[:\-]/i.test(current) && /^(?:a|answer)\s*[:\-]/i.test(next)) {
+      continue;
+    }
+
+    if (looksLikeQuestion(current) && next.length > 2 && !looksLikeQuestion(next)) {
+      addChunk(chunks, current.replace(/^\d+[.)]\s*/, ""), next, "line-pair");
+      index += 1;
     }
   }
 }
 
 function collectParagraphs(text, chunks) {
-  text.split(/\n\s*\n+/).map((p) => p.trim()).filter((p) => p.length > 25).forEach((p) => {
-    addChunk(chunks, p, "", "paragraph");
-  });
+  const paragraphs = text
+    .split(/\n\s*\n+/)
+    .map((paragraph) => paragraph.trim())
+    .filter((paragraph) => paragraph.length > 25);
+
+  for (const paragraph of paragraphs) {
+    addChunk(chunks, paragraph, "", "paragraph");
+  }
 }
 
 function collectSentences(text, chunks) {
-  text.replace(/\s+/g, " ").split(/(?<=[.!?])\s+|;\s+|\n+/).map((s) => s.trim()).filter((s) => s.length > 12).forEach((s) => {
-    addChunk(chunks, s, "", "sentence");
-  });
+  const compact = text.replace(/\s+/g, " ");
+  const sentences = compact
+    .split(/(?<=[.!?])\s+|;\s+|\n+/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length > 12);
+
+  for (const sentence of sentences) {
+    addChunk(chunks, sentence, "", "sentence");
+  }
 }
 
 function addChunk(chunks, text, answer, source) {
-  const t = cleanChunkText(text);
-  const a = cleanChunkText(answer || "");
-  if (!t || t.length < 2) return;
+  const cleanText = cleanChunkText(text);
+  const cleanAnswer = cleanChunkText(answer || "");
+  if (!cleanText || cleanText.length < 2) return;
+
   chunks.push({
     id: `chunk-${chunks.length}`,
-    text: a ? `${t}\n${a}` : t,
-    answer: a,
+    text: cleanAnswer ? `${cleanText}\n${cleanAnswer}` : cleanText,
+    answer: cleanAnswer,
     source,
     score: 0
   });
@@ -229,68 +265,93 @@ function addChunk(chunks, text, answer, source) {
 
 function walkStructuredValue(value, chunks) {
   if (Array.isArray(value)) {
-    value.forEach((item) => walkStructuredValue(item, chunks));
+    for (const item of value) walkStructuredValue(item, chunks);
     return;
   }
+
   if (!value || typeof value !== "object") return;
-  const q = value.question ?? value.q ?? value.prompt ?? value.term ?? value.front;
-  const a = value.answer ?? value.a ?? value.response ?? value.definition ?? value.back;
-  if (q && a) addChunk(chunks, String(q), String(a), "json-object");
-  for (const v of Object.values(value)) {
-    if (v && typeof v === "object") walkStructuredValue(v, chunks);
+
+  const question = value.question ?? value.q ?? value.prompt ?? value.term ?? value.front;
+  const answer = value.answer ?? value.a ?? value.response ?? value.definition ?? value.back;
+
+  if (question && answer) {
+    addChunk(chunks, String(question), String(answer), "json-object");
+  }
+
+  for (const nested of Object.values(value)) {
+    if (nested && typeof nested === "object") walkStructuredValue(nested, chunks);
   }
 }
 
 function jsonCandidates(text) {
   const candidates = [];
-  const t = text.trim();
-  if (t.startsWith("{") || t.startsWith("[")) candidates.push(t);
-  const ai = text.indexOf("["), ae = text.lastIndexOf("]");
-  if (ai >= 0 && ae > ai) candidates.push(text.slice(ai, ae + 1));
-  const oi = text.indexOf("{"), oe = text.lastIndexOf("}");
-  if (oi >= 0 && oe > oi) candidates.push(text.slice(oi, oe + 1));
-  return [...new Set(candidates)];
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) candidates.push(trimmed);
+
+  const arrayStart = text.indexOf("[");
+  const arrayEnd = text.lastIndexOf("]");
+  if (arrayStart >= 0 && arrayEnd > arrayStart) {
+    candidates.push(text.slice(arrayStart, arrayEnd + 1));
+  }
+
+  const objectStart = text.indexOf("{");
+  const objectEnd = text.lastIndexOf("}");
+  if (objectStart >= 0 && objectEnd > objectStart) {
+    candidates.push(text.slice(objectStart, objectEnd + 1));
+  }
+
+  return Array.from(new Set(candidates));
 }
 
 function retrievalScore(queryTokens, chunk) {
   const bm25 = bm25Score(queryTokens, chunk);
-  const unique = [...new Set(queryTokens)];
-  const matches = unique.filter((t) => chunk.tf[t]).length;
-  const coverage = unique.length ? matches / unique.length : 0;
-  const boost = exactPhraseBoost(queryTokens, chunk);
-  return Number((bm25 + coverage + boost).toFixed(4));
+  const uniqueTokens = Array.from(new Set(queryTokens));
+  const matches = uniqueTokens.filter((token) => chunk.tf[token]).length;
+  const coverage = uniqueTokens.length ? matches / uniqueTokens.length : 0;
+  const exactBoost = exactPhraseBoost(queryTokens, chunk);
+  return Number((bm25 + coverage + exactBoost).toFixed(4));
 }
 
 function bm25Score(queryTokens, chunk) {
-  const k1 = 1.5, b = 0.75;
+  const k1 = 1.5;
+  const b = 0.75;
   let score = 0;
+
   for (const token of new Set(queryTokens)) {
-    const freq = chunk.tf[token] || 0;
-    if (!freq) continue;
+    const frequency = chunk.tf[token] || 0;
+    if (!frequency) continue;
+
     const idf = state.idf[token] || 0.1;
-    const denom = freq + k1 * (1 - b + b * (chunk.length / state.avgLen));
-    score += idf * ((freq * (k1 + 1)) / denom);
+    const denominator = frequency + k1 * (1 - b + b * (chunk.length / state.avgLen));
+    score += idf * ((frequency * (k1 + 1)) / denominator);
   }
+
   return score;
 }
 
 function exactPhraseBoost(queryTokens, chunk) {
   const chunkTokens = new Set(Object.keys(chunk.tf || {}));
-  const matched = queryTokens.filter((t) => chunkTokens.has(t)).length;
-  if (queryTokens.length <= 2 && matched) return 0.5;
-  if (matched === queryTokens.length) return 0.4;
+  const matched = queryTokens.filter((token) => chunkTokens.has(token)).length;
+  if (queryTokens.length <= 2 && matched) return 0.45;
+  if (matched === queryTokens.length) return 0.35;
   return 0;
 }
 
 function stem(token) {
   if (token.length <= 3) return token;
-  const suffixes = ["ization", "ational", "fulness", "iveness", "tional", "ments", "ment", "ingly", "edly", "ing", "ies", "ied", "ed", "es", "s"];
-  for (const s of suffixes) {
-    if (token.endsWith(s) && token.length > s.length + 2) {
-      if (s === "ies" || s === "ied") return `${token.slice(0, -s.length)}y`;
-      return token.slice(0, -s.length);
+
+  const suffixes = [
+    "ization", "ational", "fulness", "iveness", "tional", "ments", "ment",
+    "ingly", "edly", "ing", "ies", "ied", "ed", "es", "s"
+  ];
+
+  for (const suffix of suffixes) {
+    if (token.endsWith(suffix) && token.length > suffix.length + 2) {
+      if (suffix === "ies" || suffix === "ied") return `${token.slice(0, -suffix.length)}y`;
+      return token.slice(0, -suffix.length);
     }
   }
+
   return token;
 }
 
@@ -300,22 +361,41 @@ function looksLikeQuestion(text) {
 
 function dedupeChunks(chunks) {
   const seen = new Set();
-  return chunks.filter((c) => {
-    const key = cleanChunkText(c.text).toLowerCase().slice(0, 220);
-    if (!key || seen.has(key)) return false;
+  const result = [];
+
+  for (const chunk of chunks) {
+    const key = cleanChunkText(chunk.text).toLowerCase().slice(0, 220);
+    if (!key || seen.has(key)) continue;
     seen.add(key);
-    return true;
-  });
+    result.push(chunk);
+  }
+
+  return result;
 }
 
-function cleanChunkText(v) {
-  return String(v || "").replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\'/g, "'").replace(/\s+/g, " ").trim();
+function cleanChunkText(value) {
+  return String(value || "")
+    .replace(/\\n/g, "\n")
+    .replace(/\\"/g, '"')
+    .replace(/\\'/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function normalizeText(v) {
-  return String(v || "").replace(/\r\n?/g, "\n").replace(/[""]/g, '"').replace(/['']/g, "'").trim();
+function normalizeText(value) {
+  return String(value || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .trim();
 }
 
 function emptyState() {
-  return { chunks: [], idf: {}, avgLen: 1, totalDocs: 0, ready: false };
+  return {
+    chunks: [],
+    idf: {},
+    avgLen: 1,
+    totalDocs: 0,
+    ready: false
+  };
 }

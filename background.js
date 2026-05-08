@@ -11,27 +11,14 @@ chrome.runtime.onStartup.addListener(initializeServiceWorker);
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "studyrag-keepalive") {
-    // Keeps the MV3 service worker alive.
+    // Touching this listener is enough to wake the MV3 service worker.
   }
 });
 
-// Commands ARE user gestures - sidePanel.open() works here
 chrome.commands.onCommand.addListener((command) => {
   handleCommand(command).catch((error) => {
     console.warn("StudyRAG command failed:", error);
   });
-});
-
-// Extension icon click - also a user gesture, panel opens here
-chrome.action.onClicked && chrome.action.onClicked.addListener(async (tab) => {
-  if (tab?.id) {
-    try {
-      await chrome.sidePanel.open({ tabId: tab.id });
-      panelOpen = true;
-    } catch (e) {
-      console.warn("StudyRAG: could not open panel on icon click", e);
-    }
-  }
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -42,7 +29,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: false, error: error.message || "Unknown error" });
     });
 
-  return true; // Keep channel open for async response
+  return true;
 });
 
 async function handleCommand(command) {
@@ -50,31 +37,18 @@ async function handleCommand(command) {
 
   if (command === "search-notes") {
     if (tab?.id) {
-      // Commands are user gestures - sidePanel.open() works
-      try {
-        await chrome.sidePanel.open({ tabId: tab.id });
-        panelOpen = true;
-      } catch (e) {
-        console.warn("StudyRAG: panel open failed in command", e);
-      }
+      await openPanel(tab.id);
       sendTabMessage(tab.id, { action: "collectSelectionAndSearch" });
     }
     return;
   }
 
   if (command === "toggle-panel") {
-    if (tab?.id) {
-      if (panelOpen) {
-        sendRuntimeMessage({ action: "closePanel" });
-        panelOpen = false;
-      } else {
-        try {
-          await chrome.sidePanel.open({ tabId: tab.id });
-          panelOpen = true;
-        } catch (e) {
-          console.warn("StudyRAG: panel toggle failed", e);
-        }
-      }
+    if (panelOpen) {
+      sendRuntimeMessage({ action: "closePanel" });
+      panelOpen = false;
+    } else if (tab?.id) {
+      await openPanel(tab.id);
     }
   }
 }
@@ -84,11 +58,8 @@ async function handleMessage(message, sender) {
     return { ok: false, error: "Missing action" };
   }
 
-  // Search: run retrieval + AI, publish result to panel
-  // Note: we do NOT try to open the panel here — that must happen
-  // via a command or icon click (user gesture). We just run the search
-  // and store the result; panel will show it when it next polls or receives the broadcast.
   if (message.action === "search" || message.action === "searchNotes") {
+    if (sender?.tab?.id) await openPanel(sender.tab.id);
     return handleSearch(message.query || "");
   }
 
@@ -100,21 +71,9 @@ async function handleMessage(message, sender) {
     return rebuildIndexFromStorage();
   }
 
-  // openPanel from content script — store a flag so panel knows to open
-  // Actual panel.open() must be done via user gesture (command/icon click)
-  // We can try it here but it will silently fail on most Chrome versions
   if (message.action === "openPanel") {
     const tabId = sender?.tab?.id || (await getActiveTab())?.id;
-    if (tabId) {
-      try {
-        // This may work in some Chrome versions when triggered close to a click
-        await chrome.sidePanel.open({ tabId });
-        panelOpen = true;
-      } catch (e) {
-        // Silently fails if not a user gesture context - that's expected
-        // User should use Alt+Q or Alt+S to open the panel
-      }
-    }
+    if (tabId) await openPanel(tabId);
     return { ok: true };
   }
 
@@ -124,12 +83,7 @@ async function handleMessage(message, sender) {
       sendRuntimeMessage({ action: "closePanel" });
       panelOpen = false;
     } else if (tabId) {
-      try {
-        await chrome.sidePanel.open({ tabId });
-        panelOpen = true;
-      } catch (e) {
-        console.warn("StudyRAG: togglePanel open failed - use Alt+S shortcut instead", e);
-      }
+      await openPanel(tabId);
     }
     return { ok: true, panelOpen };
   }
@@ -159,7 +113,6 @@ async function handleMessage(message, sender) {
 
 async function handleSearch(queryText) {
   const cleanQuery = String(queryText || "").trim();
-
   if (!cleanQuery) {
     const result = {
       ok: false,
@@ -196,7 +149,6 @@ async function handleSearch(queryText) {
   }
 
   const retrieval = query(cleanQuery);
-
   const baseResult = {
     ok: true,
     status: retrieval.directAnswer ? "direct" : "retrieved",
@@ -213,37 +165,24 @@ async function handleSearch(queryText) {
     const result = {
       ...baseResult,
       status: "no-match",
-      message: "No matching chunks found. Try rephrasing or check your notes."
+      message: "No matching chunks found in your notes."
     };
     await publishResult(result);
     return result;
   }
 
-  // If we have a direct answer (high confidence match), return immediately
   if (retrieval.directAnswer) {
     await publishResult(baseResult);
     return baseResult;
   }
 
-  // If we have chunks but no direct answer, still show them immediately
-  // then try AI if keys are available
-  await publishResult({ ...baseResult, status: "retrieved" });
-
-  const { apiKeys, primaryAI } = await chrome.storage.session.get(["apiKeys", "primaryAI"]);
-  const hasAnyKey = apiKeys?.grok || apiKeys?.gemini || apiKeys?.ollamaUrl;
-
-  if (!hasAnyKey) {
-    // No AI keys - just return the chunks, that's still useful
-    return baseResult;
-  }
-
-  // Publish "thinking" state
   await publishResult({
     ...baseResult,
     status: "thinking",
-    aiAnswer: "Generating explanation..."
+    aiAnswer: "Generating study explanation..."
   });
 
+  const { apiKeys, primaryAI } = await chrome.storage.session.get(["apiKeys", "primaryAI"]);
   const ai = await explainWithAI({
     question: cleanQuery,
     chunks: retrieval.chunks,
@@ -303,7 +242,7 @@ async function rebuildIndexFromStorage() {
   const { ragData } = await chrome.storage.session.get("ragData");
   const snapshot = initRetriever(ragData || "");
   await chrome.storage.session.set({ ragIndex: snapshot });
-  indexReady = snapshot.chunks.length > 0;
+  indexReady = true;
   return { ok: true, chunkCount: snapshot.chunks.length };
 }
 
@@ -311,18 +250,17 @@ async function ensureRetriever() {
   if (indexReady) return true;
 
   const { ragIndex, ragData } = await chrome.storage.session.get(["ragIndex", "ragData"]);
-
   if (ragIndex && loadRetriever(ragIndex)) {
-    indexReady = ragIndex.chunks.length > 0;
-    return indexReady;
+    indexReady = true;
+    return ragIndex.chunks.length > 0;
   }
 
   if (!ragData) return false;
 
   const snapshot = initRetriever(ragData);
   await chrome.storage.session.set({ ragIndex: snapshot });
-  indexReady = snapshot.chunks.length > 0;
-  return indexReady;
+  indexReady = true;
+  return snapshot.chunks.length > 0;
 }
 
 async function publishResult(result) {
@@ -330,13 +268,18 @@ async function publishResult(result) {
   const { history = [] } = await chrome.storage.session.get("history");
   const nextHistory = latestResult.query
     ? [
-        { query: latestResult.query, score: latestResult.score || 0, createdAt: latestResult.createdAt },
+        {
+          query: latestResult.query,
+          score: latestResult.score || 0,
+          createdAt: latestResult.createdAt
+        },
         ...history.filter((item) => item.query !== latestResult.query)
       ].slice(0, 5)
     : history;
 
   await chrome.storage.session.set({ latestResult, history: nextHistory });
   sendRuntimeMessage({ action: "showResult", result: latestResult, history: nextHistory });
+  sendRuntimeMessage({ action: "studyRagResult", result: latestResult, history: nextHistory });
 }
 
 async function publishQuiz(result) {
@@ -345,23 +288,39 @@ async function publishQuiz(result) {
 }
 
 function initializeServiceWorker() {
-  // Allow panel to read session storage
-  if (chrome.storage?.session?.setAccessLevel) {
-    chrome.storage.session
-      .setAccessLevel({ accessLevel: "TRUSTED_AND_UNTRUSTED_CONTEXTS" })
-      .catch(() => {});
-  }
+  configureSessionStorage();
+  configureSidePanel();
+  configureKeepalive();
+}
 
-  // FIX: Set openPanelOnActionClick to TRUE so clicking the extension icon opens the panel
-  // We handle icon clicks via action.onClicked above only if this is false,
-  // but actually setting it true is simpler and more reliable
+function configureSessionStorage() {
+  if (chrome.storage?.session?.setAccessLevel) {
+    chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_AND_UNTRUSTED_CONTEXTS" }).catch(() => {});
+  }
+}
+
+function configureSidePanel() {
   if (chrome.sidePanel?.setPanelBehavior) {
     chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
   }
+}
 
-  // Keepalive alarm
+function configureKeepalive() {
   if (chrome.alarms?.create) {
-    chrome.alarms.create("studyrag-keepalive", { periodInMinutes: 0.4 });
+    chrome.alarms.create("studyrag-keepalive", { periodInMinutes: 0.5 });
+  }
+}
+
+async function openPanel(tabId) {
+  if (!chrome.sidePanel?.open || !tabId) return false;
+
+  try {
+    await chrome.sidePanel.open({ tabId });
+    panelOpen = true;
+    return true;
+  } catch (error) {
+    console.warn("StudyRAG side panel could not be opened:", error);
+    return false;
   }
 }
 
@@ -374,7 +333,7 @@ function sendRuntimeMessage(message) {
   try {
     chrome.runtime.sendMessage(message, () => {
       if (chrome.runtime.lastError) {
-        // Panel may be closed; result is persisted in storage for when it reopens.
+        // Side panel may be closed; latest results are already persisted.
       }
     });
   } catch {
@@ -386,10 +345,10 @@ function sendTabMessage(tabId, message) {
   try {
     chrome.tabs.sendMessage(tabId, message, () => {
       if (chrome.runtime.lastError) {
-        // Tab may not have content script yet.
+        // Existing tabs may not have the content script until the tab is reloaded.
       }
     });
   } catch {
-    // Ignore.
+    // Ignore tabs where content scripts cannot run.
   }
 }

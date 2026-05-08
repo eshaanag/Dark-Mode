@@ -1,214 +1,177 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>StudyRAG Panel</title>
-    <style>
-      :root {
-        color-scheme: light;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
+<head>
+  <meta charset="utf-8">
+  <title>StudyRAG</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: #f8fafc; color: #111827; font-size: 13px; }
 
-      body {
-        margin: 0;
-        background: #f8fafc;
-        color: #111827;
-      }
+    /* TAB BAR */
+    .tabs { display: flex; border-bottom: 2px solid #e5e7eb; background: #fff; }
+    .tab {
+      flex: 1; padding: 10px 4px; border: none; background: none;
+      font: 600 12px system-ui; color: #6b7280; cursor: pointer;
+      border-bottom: 2px solid transparent; margin-bottom: -2px;
+    }
+    .tab.active { color: #2563eb; border-bottom-color: #2563eb; }
 
-      .app {
-        min-height: 100vh;
-        display: flex;
-        flex-direction: column;
-      }
+    /* PAGES */
+    .page { display: none; padding: 12px; }
+    .page.active { display: block; }
 
-      header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 12px 14px;
-        border-bottom: 1px solid #e5e7eb;
-        background: #fff;
-      }
+    /* SEARCH PAGE */
+    .search-row { display: flex; gap: 8px; }
+    .search-row input {
+      flex: 1; height: 36px; border: 1px solid #d1d5db;
+      border-radius: 7px; padding: 0 10px; font: 13px inherit;
+    }
+    .btn-primary {
+      height: 36px; border: none; border-radius: 7px;
+      background: #2563eb; color: #fff; padding: 0 14px;
+      font: 600 13px inherit; cursor: pointer; white-space: nowrap;
+    }
+    .btn-primary:hover { background: #1d4ed8; }
 
-      h1 {
-        margin: 0;
-        font-size: 16px;
-      }
+    .card { margin-top: 10px; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; overflow: hidden; }
+    .card-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 10px; border-bottom: 1px solid #f0f0f0;
+      font-size: 11px; font-weight: 700; color: #374151; text-transform: uppercase; letter-spacing: .04em;
+    }
+    .card-body { padding: 10px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; min-height: 36px; }
+    .muted { color: #9ca3af; font-style: italic; }
+    .badge { border-radius: 99px; padding: 2px 8px; font-size: 11px; font-weight: 700; background: #fef3c7; color: #92400e; }
+    .badge.good { background: #dcfce7; color: #166534; }
+    mark { background: #fde68a; border-radius: 2px; padding: 0 1px; }
 
-      .icon-button {
-        width: 30px;
-        height: 30px;
-        border: 1px solid #d1d5db;
-        border-radius: 6px;
-        background: #fff;
-        color: #374151;
-        font-size: 18px;
-        cursor: pointer;
-      }
+    .btn-secondary {
+      width: 100%; margin-top: 10px; padding: 9px; border: 1px solid #d1d5db;
+      border-radius: 7px; background: #fff; color: #374151;
+      font: 600 13px inherit; cursor: pointer;
+    }
+    .btn-secondary:hover { background: #f9fafb; }
 
-      main {
-        padding: 12px;
-      }
+    .history-list { margin-top: 10px; }
+    .history-list button {
+      display: block; width: 100%; text-align: left; padding: 7px 10px;
+      margin-bottom: 4px; border: 1px solid #e5e7eb; border-radius: 6px;
+      background: #fff; font: 13px inherit; color: #374151; cursor: pointer;
+    }
+    .history-list button:hover { background: #f9fafb; }
 
-      .search-row {
-        display: grid;
-        grid-template-columns: 1fr auto;
-        gap: 8px;
-      }
+    /* NOTES PAGE */
+    #notesPage textarea {
+      width: 100%; height: 260px; padding: 10px; border: 1px solid #d1d5db;
+      border-radius: 7px; font: 13px inherit; resize: vertical; line-height: 1.4;
+    }
+    .load-btn {
+      width: 100%; margin-top: 8px; height: 38px; border: none;
+      border-radius: 7px; background: #2563eb; color: #fff;
+      font: 700 13px inherit; cursor: pointer;
+    }
+    .load-btn:disabled { background: #93c5fd; cursor: wait; }
+    .status-bar {
+      margin-top: 8px; padding: 8px 10px; border-radius: 6px;
+      background: #f0fdf4; border: 1px solid #bbf7d0;
+      font-size: 12px; color: #166534; min-height: 32px;
+    }
+    .status-bar.warn { background: #fff7ed; border-color: #fed7aa; color: #9a3412; }
+    .format-hint {
+      margin-top: 12px; padding: 10px; background: #eff6ff;
+      border: 1px solid #bfdbfe; border-radius: 7px; font-size: 12px; color: #1e40af; line-height: 1.6;
+    }
+    .format-hint b { display: block; margin-bottom: 4px; }
+    .format-hint code { background: #dbeafe; padding: 1px 4px; border-radius: 3px; font-family: monospace; }
 
-      input {
-        min-width: 0;
-        height: 36px;
-        border: 1px solid #d1d5db;
-        border-radius: 7px;
-        padding: 0 10px;
-        font: 13px inherit;
-      }
+    /* SETTINGS PAGE */
+    #settingsPage label { display: block; margin-top: 12px; font-size: 12px; font-weight: 600; color: #374151; }
+    #settingsPage input, #settingsPage select {
+      width: 100%; height: 34px; margin-top: 4px; padding: 0 10px;
+      border: 1px solid #d1d5db; border-radius: 7px; font: 13px inherit;
+    }
+    .save-settings {
+      width: 100%; margin-top: 14px; height: 36px; border: none;
+      border-radius: 7px; background: #2563eb; color: #fff;
+      font: 600 13px inherit; cursor: pointer;
+    }
+    .saved-msg { margin-top: 6px; font-size: 12px; color: #16a34a; text-align: center; }
+  </style>
+</head>
+<body>
 
-      button {
-        height: 36px;
-        border: 0;
-        border-radius: 7px;
-        background: #2563eb;
-        color: #fff;
-        padding: 0 12px;
-        font: 650 13px inherit;
-        cursor: pointer;
-      }
+<div class="tabs">
+  <button class="tab active" data-tab="searchPage">🔍 Search</button>
+  <button class="tab" data-tab="notesPage">📝 Notes</button>
+  <button class="tab" data-tab="settingsPage">⚙ Settings</button>
+</div>
 
-      button.secondary {
-        width: 100%;
-        margin-top: 10px;
-        border: 1px solid #cbd5e1;
-        background: #fff;
-        color: #111827;
-      }
+<!-- SEARCH TAB -->
+<div id="searchPage" class="page active">
+  <div class="search-row">
+    <input id="query" type="search" placeholder="Type a question or select text on page…">
+    <button class="btn-primary" id="searchBtn">Search</button>
+  </div>
 
-      .card {
-        margin-top: 12px;
-        border: 1px solid #e5e7eb;
-        border-radius: 8px;
-        background: #fff;
-        overflow: hidden;
-      }
-
-      .card-head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-        padding: 9px 10px;
-        border-bottom: 1px solid #eef2f7;
-        font-size: 12px;
-        font-weight: 750;
-        color: #374151;
-      }
-
-      .card-body {
-        padding: 10px;
-        font-size: 13px;
-        line-height: 1.48;
-        white-space: pre-wrap;
-      }
-
-      .badge {
-        flex: none;
-        border-radius: 999px;
-        padding: 3px 7px;
-        background: #fef3c7;
-        color: #92400e;
-        font-size: 11px;
-        font-weight: 750;
-      }
-
-      .badge.good {
-        background: #dcfce7;
-        color: #166534;
-      }
-
-      mark {
-        border-radius: 3px;
-        background: #fde68a;
-        padding: 0 2px;
-      }
-
-      .muted {
-        color: #6b7280;
-      }
-
-      .history {
-        margin-top: 14px;
-      }
-
-      .history h2 {
-        margin: 0 0 8px;
-        font-size: 12px;
-        color: #4b5563;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-      }
-
-      .history button {
-        display: block;
-        width: 100%;
-        height: auto;
-        margin: 0 0 6px;
-        border: 1px solid #e5e7eb;
-        background: #fff;
-        color: #111827;
-        padding: 8px;
-        text-align: left;
-        font-weight: 500;
-      }
-    </style>
-  </head>
-  <body>
-    <div class="app">
-      <header>
-        <h1>StudyRAG</h1>
-        <button id="closePanel" class="icon-button" title="Close panel" aria-label="Close panel">&times;</button>
-      </header>
-
-      <main>
-        <div class="search-row">
-          <input id="query" type="search" placeholder="Type or paste a question">
-          <button id="search">Search</button>
-        </div>
-
-        <section class="card">
-          <div class="card-head">
-            <span>From your notes</span>
-            <span id="confidence" class="badge">0%</span>
-          </div>
-          <div id="notesResult" class="card-body muted">Select text on a page or type a question above.</div>
-        </section>
-
-        <section class="card">
-          <div class="card-head">
-            <span>AI explanation</span>
-            <span id="provider" class="muted"></span>
-          </div>
-          <div id="aiResult" class="card-body muted">AI will explain when a direct notes answer is not available.</div>
-        </section>
-
-        <button id="quizMe" class="secondary">Quiz me</button>
-
-        <section class="card" id="quizCard" hidden>
-          <div class="card-head">
-            <span>Practice question</span>
-            <span id="quizProvider" class="muted"></span>
-          </div>
-          <div id="quizResult" class="card-body"></div>
-        </section>
-
-        <section class="history">
-          <h2>History</h2>
-          <div id="history"></div>
-        </section>
-      </main>
+  <div class="card">
+    <div class="card-head">
+      <span>From your notes</span>
+      <span id="confidence" class="badge">0%</span>
     </div>
+    <div id="notesResult" class="card-body muted">Load notes in the Notes tab first, then search.</div>
+  </div>
 
-    <script src="panel.js"></script>
-  </body>
+  <div class="card">
+    <div class="card-head">
+      <span>AI explanation</span>
+      <span id="provider" style="font-size:11px;color:#9ca3af"></span>
+    </div>
+    <div id="aiResult" class="card-body muted">AI answer appears here when notes don't have a direct match.</div>
+  </div>
+
+  <button class="btn-secondary" id="quizBtn">🎯 Quiz me on top result</button>
+
+  <div class="card" id="quizCard" style="display:none">
+    <div class="card-head">Practice question <span id="quizProvider" style="font-size:11px;color:#9ca3af"></span></div>
+    <div id="quizResult" class="card-body"></div>
+  </div>
+
+  <div class="history-list" id="historyList"></div>
+</div>
+
+<!-- NOTES TAB -->
+<div id="notesPage" class="page">
+  <textarea id="notesInput" placeholder="Paste your notes, Q&A pairs, raw text, or JS objects here…"></textarea>
+  <button class="load-btn" id="loadBtn">Load Notes</button>
+  <div class="status-bar" id="statusBar">No notes loaded yet.</div>
+
+  <div class="format-hint">
+    <b>Supported formats (paste any of these):</b>
+    <code>Q: question</code> then <code>A: answer</code> on next line<br>
+    Raw paragraphs — any text works<br>
+    JS/JSON objects with <code>question:</code> and <code>answer:</code> fields<br>
+    Numbered lists like <code>1. question - answer</code>
+  </div>
+</div>
+
+<!-- SETTINGS TAB -->
+<div id="settingsPage" class="page">
+  <label>Grok API Key</label>
+  <input id="grokKey" type="password" placeholder="xai-...">
+  <label>Gemini API Key</label>
+  <input id="geminiKey" type="password" placeholder="AIza...">
+  <label>Ollama URL</label>
+  <input id="ollamaUrl" type="url" value="http://localhost:11434">
+  <label>Primary AI</label>
+  <select id="primaryAI">
+    <option value="grok">Grok</option>
+    <option value="gemini">Gemini</option>
+    <option value="ollama">Ollama</option>
+  </select>
+  <button class="save-settings" id="saveSettings">Save Settings</button>
+  <div class="saved-msg" id="savedMsg"></div>
+</div>
+
+<script src="panel.js"></script>
+</body>
 </html>
